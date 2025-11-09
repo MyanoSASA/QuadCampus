@@ -9,8 +9,7 @@ public class DroneFlightController : MonoBehaviour
     public enum FlightMode
     {
         Position,
-        Attitude,
-        Manual
+        Attitude
     }
 
     public enum ControlStickMode
@@ -55,12 +54,6 @@ public class DroneFlightController : MonoBehaviour
     [SerializeField, Tooltip("高度保持のバネ係数")] private float altitudeSpring = 14f;
     [SerializeField, Tooltip("高度保持の減衰係数")] private float altitudeDamping = 7f;
 
-    [Header("Mモード: 手動")]
-    [SerializeField, Tooltip("ピッチ操作の相対トルク量")] private float manualPitchAuthority = 6f;
-    [SerializeField, Tooltip("ロール操作の相対トルク量")] private float manualRollAuthority = 6f;
-    [SerializeField, Tooltip("ヨー操作の相対トルク量")] private float manualYawAuthority = 4f;
-    [SerializeField, Tooltip("上下入力が追加できる推力 (N)")] private float manualCollectiveAuthority = 35f;
-    [SerializeField, Tooltip("手動時の水平速度減衰量")] private float manualVelocityDamping = 2f;
 
     [Header("入力設定")]
     [SerializeField, Tooltip("横移動用 Input Axis 名 (空欄で未使用)")] private string horizontalAxis = "Horizontal";
@@ -103,6 +96,8 @@ public class DroneFlightController : MonoBehaviour
     float _targetYawDeg;
     float _targetAltitude;
     float _currentThrust;
+    float _baseMaxPlanarVelocity;
+    float _baseMaxVerticalVelocity;
 
     Vector2 _planarInput;
     float _verticalInput;
@@ -112,6 +107,8 @@ public class DroneFlightController : MonoBehaviour
     {
         _rb = GetComponent<Rigidbody>();
         TryGetComponent(out _droneScript);
+        _baseMaxPlanarVelocity = Mathf.Max(0.01f, maxPlanarVelocity);
+        _baseMaxVerticalVelocity = Mathf.Max(0.01f, maxVerticalVelocity);
         InitializeUI();
     }
 
@@ -144,9 +141,6 @@ public class DroneFlightController : MonoBehaviour
                 break;
             case FlightMode.Attitude:
                 SimulateAttitudeMode(dt);
-                break;
-            case FlightMode.Manual:
-                SimulateManualMode(dt);
                 break;
         }
     }
@@ -188,13 +182,19 @@ public class DroneFlightController : MonoBehaviour
         pitchInput = ApplyDeadZone(pitchInput);
         rollInput = ApplyDeadZone(rollInput);
 
-        _verticalInput = Mathf.Clamp(throttleInput * Mathf.Max(0f, throttleInputSensitivity), -1f, 1f);
-        _yawInput = Mathf.Clamp(yawInput * Mathf.Max(0f, yawInputSensitivity), -1f, 1f);
+        float throttleSensitivity = Mathf.Max(0f, throttleInputSensitivity);
+        float yawSensitivity = Mathf.Max(0f, yawInputSensitivity);
         float rollSensitivity = Mathf.Max(0f, rollInputSensitivity);
         float pitchSensitivity = Mathf.Max(0f, pitchInputSensitivity);
+
+        float verticalRange = Mathf.Max(1f, throttleSensitivity);
+        float yawRange = Mathf.Max(1f, yawSensitivity);
+
+        _verticalInput = Mathf.Clamp(throttleInput * throttleSensitivity, -verticalRange, verticalRange);
+        _yawInput = Mathf.Clamp(yawInput * yawSensitivity, -yawRange, yawRange);
         _planarInput = new Vector2(
-            Mathf.Clamp(rollInput * rollSensitivity, -1f, 1f),
-            Mathf.Clamp(pitchInput * pitchSensitivity, -1f, 1f));
+            Mathf.Clamp(rollInput * rollSensitivity, -rollSensitivity, rollSensitivity),
+            Mathf.Clamp(pitchInput * pitchSensitivity, -pitchSensitivity, pitchSensitivity));
     }
 
     float ReadAxis(string axisName)
@@ -298,20 +298,6 @@ public class DroneFlightController : MonoBehaviour
         ApplyThrust(targetThrust, dt);
     }
 
-    void SimulateManualMode(float dt)
-    {
-        float hoverForce = _rb.mass * Physics.gravity.magnitude * hoverThrustMultiplier;
-        float targetThrust = Mathf.Clamp(hoverForce + _verticalInput * manualCollectiveAuthority, 0f, maxThrust);
-
-        Vector3 planarVelocity = new Vector3(_rb.velocity.x, 0f, _rb.velocity.z);
-        _rb.AddForce(-planarVelocity * manualVelocityDamping, ForceMode.Acceleration);
-
-        Vector3 torque = new Vector3(_planarInput.y * manualPitchAuthority, _yawInput * manualYawAuthority, -_planarInput.x * manualRollAuthority);
-        _rb.AddRelativeTorque(torque, ForceMode.Acceleration);
-        _rb.AddTorque(-_rb.angularVelocity * angularDamping, ForceMode.Acceleration);
-
-        ApplyThrust(targetThrust, dt);
-    }
 
     void ApplyOrientation(Quaternion desiredRotation, float dt, bool snap)
     {
@@ -370,11 +356,18 @@ public class DroneFlightController : MonoBehaviour
         if (hasPlanarInput)
         {
             Vector3 planar = new Vector3(_planarInput.x, 0f, _planarInput.y);
-            float magnitude = Mathf.Clamp(planar.magnitude, 0f, 1f);
-            Vector3 worldDirection = Quaternion.Euler(0f, _targetYawDeg, 0f) * planar.normalized;
-            Vector3 desiredVelocity = worldDirection * positionCommandSpeed * magnitude;
-            desiredVelocity = Vector3.ClampMagnitude(desiredVelocity, maxPlanarVelocity);
-            _hoverTargetPosition += desiredVelocity * dt;
+            float planarMagnitude = planar.magnitude;
+            float maxPlanarInput = Mathf.Max(1f, rollInputSensitivity, pitchInputSensitivity);
+            float clampedMagnitude = Mathf.Clamp(planarMagnitude, 0f, maxPlanarInput);
+
+            if (planarMagnitude > 1e-4f)
+            {
+                Vector3 worldDirection = Quaternion.Euler(0f, _targetYawDeg, 0f) * (planar / planarMagnitude);
+                float planarScaleFactor = _baseMaxPlanarVelocity > 1e-4f ? maxPlanarVelocity / _baseMaxPlanarVelocity : 1f;
+                Vector3 desiredVelocity = worldDirection * positionCommandSpeed * planarScaleFactor * clampedMagnitude;
+                desiredVelocity = Vector3.ClampMagnitude(desiredVelocity, maxPlanarVelocity);
+                _hoverTargetPosition += desiredVelocity * dt;
+            }
         }
         else
         {
@@ -384,7 +377,8 @@ public class DroneFlightController : MonoBehaviour
 
         if (Mathf.Abs(_verticalInput) > autoHoldInputThreshold)
         {
-            float desiredVerticalVelocity = Mathf.Clamp(_verticalInput * altitudeCommandSpeed, -maxVerticalVelocity, maxVerticalVelocity);
+            float verticalScaleFactor = _baseMaxVerticalVelocity > 1e-4f ? maxVerticalVelocity / _baseMaxVerticalVelocity : 1f;
+            float desiredVerticalVelocity = Mathf.Clamp(_verticalInput * altitudeCommandSpeed * verticalScaleFactor, -maxVerticalVelocity, maxVerticalVelocity);
             _hoverTargetPosition += Vector3.up * (desiredVerticalVelocity * dt);
         }
         else
@@ -403,7 +397,8 @@ public class DroneFlightController : MonoBehaviour
             return;
         }
 
-        float desiredVerticalVelocity = Mathf.Clamp(_verticalInput * altitudeCommandSpeed, -maxVerticalVelocity, maxVerticalVelocity);
+        float verticalScaleFactor = _baseMaxVerticalVelocity > 1e-4f ? maxVerticalVelocity / _baseMaxVerticalVelocity : 1f;
+        float desiredVerticalVelocity = Mathf.Clamp(_verticalInput * altitudeCommandSpeed * verticalScaleFactor, -maxVerticalVelocity, maxVerticalVelocity);
         _targetAltitude += desiredVerticalVelocity * dt;
     }
 
@@ -476,7 +471,6 @@ public class DroneFlightController : MonoBehaviour
         {
             FlightMode.Position => "MODE : P (Position Hold)",
             FlightMode.Attitude => "MODE : A (Attitude)",
-            FlightMode.Manual => "MODE : M (Manual)",
             _ => $"MODE : {_currentMode}"
         };
         modeLabel.text = $"{flightModeText} | Stick : {controlStickMode}";
@@ -627,6 +621,7 @@ public class DroneFlightController : MonoBehaviour
             flightModeDropdown.onValueChanged.RemoveAllListeners();
             flightModeDropdown.SetValueWithoutNotify((int)_currentMode);
             flightModeDropdown.onValueChanged.AddListener(i => SetFlightMode((FlightMode)Mathf.Clamp(i, 0, modes.Length - 1)));
+            AdjustDropdownTemplateHeight(flightModeDropdown);
         }
 
         if (stickModeDropdown != null)
@@ -637,6 +632,7 @@ public class DroneFlightController : MonoBehaviour
             stickModeDropdown.onValueChanged.RemoveAllListeners();
             stickModeDropdown.SetValueWithoutNotify((int)controlStickMode);
             stickModeDropdown.onValueChanged.AddListener(i => SetControlStickMode((ControlStickMode)Mathf.Clamp(i, 0, modes.Length - 1)));
+            AdjustDropdownTemplateHeight(stickModeDropdown);
         }
 
         if (snapAutoRotationToggle != null)
@@ -677,6 +673,75 @@ public class DroneFlightController : MonoBehaviour
             setter.Invoke(v);
             SetSliderValue(binding, v, format);
         });
+    }
+
+    void AdjustDropdownTemplateHeight(Dropdown dropdown)
+    {
+        if (dropdown == null) return;
+
+        RectTransform template = dropdown.template;
+        if (template == null) return;
+
+        bool templateWasActive = template.gameObject.activeSelf;
+        if (!templateWasActive) template.gameObject.SetActive(true);
+
+        try
+        {
+            ScrollRect scrollRect = template.GetComponent<ScrollRect>();
+            RectTransform contentRect = scrollRect != null ? scrollRect.content : null;
+            if (contentRect == null)
+            {
+                var layoutGroup = template.GetComponentInChildren<VerticalLayoutGroup>(true);
+                contentRect = layoutGroup != null ? layoutGroup.GetComponent<RectTransform>() : null;
+            }
+
+            Toggle itemToggle = template.GetComponentInChildren<Toggle>(true);
+            RectTransform itemRect = itemToggle != null ? itemToggle.GetComponent<RectTransform>() : null;
+
+            float itemHeight = itemRect != null ? Mathf.Abs(itemRect.rect.height) : 0f;
+            if (itemHeight < 1e-3f && itemToggle != null && itemToggle.targetGraphic != null)
+            {
+                itemHeight = Mathf.Abs(itemToggle.targetGraphic.rectTransform.rect.height);
+            }
+            if (itemHeight < 1e-3f)
+            {
+                itemHeight = 20f;
+            }
+
+            int optionCount = Mathf.Max(1, dropdown.options?.Count ?? 0);
+
+            VerticalLayoutGroup layout = contentRect != null ? contentRect.GetComponent<VerticalLayoutGroup>() : null;
+            float spacing = layout != null ? layout.spacing : 0f;
+            float padding = layout != null ? layout.padding.top + layout.padding.bottom : 0f;
+
+            float totalHeight = optionCount * itemHeight + spacing * (optionCount - 1) + padding;
+            float desiredHeight = Mathf.Max(template.rect.height, totalHeight);
+
+            template.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, desiredHeight);
+
+            RectTransform viewportRect = scrollRect != null ? scrollRect.viewport : null;
+            if (viewportRect != null)
+            {
+                viewportRect.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, desiredHeight);
+            }
+
+            if (contentRect != null)
+            {
+                contentRect.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, totalHeight);
+                LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
+            }
+            else
+            {
+                LayoutRebuilder.ForceRebuildLayoutImmediate(template);
+            }
+        }
+        finally
+        {
+            if (!templateWasActive)
+            {
+                template.gameObject.SetActive(false);
+            }
+        }
     }
 
     static void UpdateSliderLabel(FloatSliderBinding binding, float value, string format)
