@@ -1,0 +1,86 @@
+# ===== Unity ===============================================================
+# 参考: https://github.com/github/gitignore/blob/main/Unity.gitignore
+
+# --- OS ごとのゴミ ----------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+
+# --- Unity が生成する一時・キャッシュ ----------------------------------------
+Library/
+Temp/
+Obj/
+Logs/
+UserSettings/
+MemoryCaptures/
+UnityPackageManager/
+Build/
+Builds/
+[Bb]uilds/
+[Pp]rofiles/
+[Uu]ser[Dd]ata/
+
+# Burst AOT キャッシュ
+.burst/
+.burst2/
+
+# --- Unity の IDE・ビルド関連ファイル ----------------------------------------
+*.pidb
+*.suo
+*.user
+*.userprefs
+*.unityproj
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.VC.opendb
+
+# Visual Studio / Rider
+*.csproj
+*.vbproj
+*.sln
+*.sln.docstates
+*.dotSettings
+.idea/
+.vs/
+.gradle/
+
+# --- Unity Asset Store / Packages ------------------------------------------
+Assets/AssetStoreTools*
+
+# --- Crash / Log / Builds --------------------------------------------------
+*.apk
+*.aab
+*.unitypackage
+*.stackdump
+
+# --- テスト結果 -------------------------------------------------------------
+TestResults/
+
+# --- 特定ファイルを追跡するための例外 ----------------------------------------
+!Logs/.gitkeep
+!Build/.gitkeep
+!Builds/.gitkeep
+!Packages/manifest.json
+!Packages/packages-lock.json
+!ProjectSettings/ProjectSettings.asset
+!ProjectSettings/TagManager.asset
+!ProjectSettings/EditorBuildSettings.asset
+!ProjectSettings/GraphicsSettings.asset
+!ProjectSettings/ProjectVersion.txt
+
+

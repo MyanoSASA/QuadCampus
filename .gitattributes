@@ -1,0 +1,66 @@
+# ===== Unity Git Attributes ================================================
+
+# 基本設定
+* text=auto
+
+# ソースコードはテキスト扱い
+*.cs text diff=csharp
+*.js text
+*.boo text
+*.shader text
+*.cginc text
+*.hlsl text
+*.compute text
+*.glslinc text
+
+# Unity YAML アセットは常に LF & unityyamlmerge
+*.unity      text eol=lf merge=unityyamlmerge
+*.prefab     text eol=lf merge=unityyamlmerge
+*.asset      text eol=lf merge=unityyamlmerge
+*.meta       text eol=lf merge=unityyamlmerge
+*.anim       text eol=lf merge=unityyamlmerge
+*.controller text eol=lf merge=unityyamlmerge
+*.timeline   text eol=lf merge=unityyamlmerge
+
+# JSON / YAML
+*.json text
+*.yml  text
+*.yaml text
+
+# シェーダーや設定
+ProjectSettings/*.asset text eol=lf merge=unityyamlmerge
+ProjectSettings/*.txt   text eol=lf
+
+# バイナリアセット
+*.fbx   binary
+*.obj   binary
+*.dae   binary
+*.tga   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.psd   binary
+*.tif   binary
+*.tiff  binary
+*.wav   binary
+*.mp3   binary
+*.ogg   binary
+*.aif   binary
+*.aiff  binary
+*.mp4   binary
+*.mov   binary
+*.exr   binary
+*.hdr   binary
+*.ttf   binary
+*.otf   binary
+*.dll   binary
+*.so    binary
+*.a     binary
+*.zip   binary
+*.unitypackage binary
+
+# Git Large File Storage (コメントアウト: 必要に応じて有効化)
+# *.psd filter=lfs diff=lfs merge=lfs -text
+# *.mp4 filter=lfs diff=lfs merge=lfs -text
+
+
