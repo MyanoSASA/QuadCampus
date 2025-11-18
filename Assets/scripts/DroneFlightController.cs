@@ -73,6 +73,11 @@ public class DroneFlightController : MonoBehaviour
     [SerializeField, Tooltip("スロットル入力の感度倍率")] private float throttleInputSensitivity = 1f;
     [SerializeField, Tooltip("ヨー入力の感度倍率")] private float yawInputSensitivity = 1f;
 
+    [Header("バーチャルジョイスティック")]
+    [SerializeField, Tooltip("左スティックに対応するバーチャルジョイスティック")] private VirtualJoystick leftVirtualJoystick;
+    [SerializeField, Tooltip("右スティックに対応するバーチャルジョイスティック")] private VirtualJoystick rightVirtualJoystick;
+    [SerializeField, Tooltip("バーチャルジョイスティックを優先的に使用する")] private bool preferVirtualJoysticks = true;
+
     [Header("オートホールド設定")]
     [SerializeField, Tooltip("入力が無いとみなす閾値")] private float autoHoldInputThreshold = 0.05f;
 
@@ -88,6 +93,41 @@ public class DroneFlightController : MonoBehaviour
     [SerializeField] private FloatSliderBinding maxPlanarVelocitySlider = new FloatSliderBinding(0f, 12f, 1, "最大水平速度");
     [SerializeField] private FloatSliderBinding maxVerticalVelocitySlider = new FloatSliderBinding(0f, 10f, 1, "最大垂直速度");
 
+    [Header("ランディング管理")]
+    [SerializeField, Tooltip("着地判定に使用するレイの長さ (m)")] private float landingCheckDistance = 0.35f;
+    [SerializeField, Tooltip("着地判定に使用するレイヤーマスク")] private LayerMask landingLayerMask = ~0;
+    [SerializeField, Tooltip("着地判定とみなす垂直速度の上限 (m/s)")] private float landingVerticalSpeedThreshold = 0.6f;
+    [SerializeField, Tooltip("着地判定とみなす水平速度の上限 (m/s)")] private float landingPlanarSpeedThreshold = 0.7f;
+    [SerializeField, Tooltip("着地判定スフィアの半径 (m)")] private float landingProbeRadius = 0.18f;
+    [SerializeField, Tooltip("着地判定スフィアの下向きオフセット (m)")] private float landingProbeOffset = 0.05f;
+    [SerializeField, Tooltip("着地完了とみなす地面との距離 (m)")] private float landingHeightTolerance = 0.08f;
+    [SerializeField, Tooltip("ディスアーム判定に必要な下向き入力")] private float disarmInputThreshold = -0.8f;
+    [SerializeField, Tooltip("ディスアーム判定に必要な連続時間 (秒)")] private float disarmHoldDuration = 0.5f;
+    [SerializeField, Tooltip("アーム判定に使用するスティック入力閾値")] private float armGestureThreshold = 0.8f;
+    [SerializeField, Tooltip("アーム判定に必要な連続時間 (秒)")] private float armHoldDuration = 0.6f;
+    [SerializeField, Tooltip("モーター音などに使用する AudioSource")] private AudioSource rotorAudioSource;
+    [SerializeField, Tooltip("着陸時にRigidbodyの位置を固定する")] private bool freezePositionWhenLanded = true;
+    [SerializeField, Tooltip("位置固定時に回転も固定する")] private bool freezeRotationWhenLanded = false;
+
+    [Header("アーム/ディスアーム遷移")]
+    [SerializeField, Tooltip("アーム時に強制スロットルを目標値まで滑らかに上げる時間 (秒)")] private float armThrottleRampDuration = 0.8f;
+    [SerializeField, Tooltip("ディスアーム時に強制スロットルを0まで滑らかに下げる時間 (秒)")] private float disarmThrottleRampDuration = 0.6f;
+    [SerializeField, Tooltip("モーター音の最小ピッチ")] private float rotorPitchMin = 0.6f;
+    [SerializeField, Tooltip("モーター音の最大ピッチ")] private float rotorPitchMax = 1.15f;
+    [SerializeField, Tooltip("アーム直後（アイドル時）のピッチ")] private float rotorPitchIdle = 0.72f;
+    [SerializeField, Tooltip("ホバリング時の基準ピッチ")] private float rotorPitchHover = 0.98f;
+    [SerializeField, Tooltip("上昇時に加算するピッチ幅")] private float rotorPitchAscentBoost = 0.1f;
+    [SerializeField, Tooltip("上昇として扱う垂直速度基準 (m/s)")] private float rotorPitchAscentReferenceSpeed = 3f;
+    [SerializeField, Tooltip("移動時に加算するピッチ幅")] private float rotorPitchMoveBoost = 0.04f;
+    [SerializeField, Tooltip("移動として扱う水平速度基準 (m/s)")] private float rotorPitchMoveReferenceSpeed = 5f;
+    [SerializeField, Tooltip("ピッチ変化の補間速度 (1/秒)")] private float rotorPitchSlewRate = 3.5f;
+
+    [Header("ステータス表示")]
+    [SerializeField, Tooltip("高度を表示するテキスト")]
+    private Text altitudeStatusLabel;
+    [SerializeField, Tooltip("速度を表示するテキスト")]
+    private Text speedStatusLabel;
+
     Rigidbody _rb;
     DroneScript _droneScript;
     bool _controllerConnected;
@@ -102,19 +142,47 @@ public class DroneFlightController : MonoBehaviour
     Vector2 _planarInput;
     float _verticalInput;
     float _yawInput;
+    Vector2 _leftStickRaw;
+    Vector2 _rightStickRaw;
+    bool _motorsArmed = false;
+    bool _isLanded;
+    bool _wasLanded;
+    float _disarmHoldTimer;
+    float _armHoldTimer;
+    float _forcedRotorThrottle = -1f;
+    float _forcedRotorThrottleTarget = -1f;
+    Vector2 _planarControlInput;
+    float _verticalControlInput;
+    float _yawControlInput;
+    bool _liftOffRequested;
+    readonly RaycastHit[] _landingHits = new RaycastHit[4];
+    bool _rotorAudioStopPending;
+    bool _rotorDeactivatePending;
+    float _currentRotorPitch;
+    RigidbodyConstraints _initialConstraints;
+    bool _constraintsFrozen;
 
     void Awake()
     {
         _rb = GetComponent<Rigidbody>();
         TryGetComponent(out _droneScript);
+        if (_rb != null)
+        {
+            _initialConstraints = _rb.constraints;
+        }
+        _constraintsFrozen = false;
         _baseMaxPlanarVelocity = Mathf.Max(0.01f, maxPlanarVelocity);
         _baseMaxVerticalVelocity = Mathf.Max(0.01f, maxVerticalVelocity);
+        float minPitch = Mathf.Min(rotorPitchMin, rotorPitchMax);
+        float maxPitch = Mathf.Max(rotorPitchMin, rotorPitchMax);
+        _currentRotorPitch = Mathf.Clamp(rotorPitchIdle, minPitch, maxPitch);
         InitializeUI();
     }
 
     void OnEnable()
     {
         SetFlightMode(initialMode, true);
+        DisarmMotors();
     }
 
     void Update()
@@ -128,11 +196,15 @@ public class DroneFlightController : MonoBehaviour
             if (Input.GetKeyDown(KeyCode.Alpha1)) SetFlightMode(FlightMode.Position);
             if (Input.GetKeyDown(KeyCode.Alpha2)) SetFlightMode(FlightMode.Attitude);
         }
+
+        UpdateStatusUI();
     }
 
     void FixedUpdate()
     {
         float dt = Time.fixedDeltaTime;
+
+        UpdateLandingState(dt);
 
         switch (_currentMode)
         {
@@ -149,11 +221,14 @@ public class DroneFlightController : MonoBehaviour
     {
         Vector2 controllerLeft = new Vector2(ReadAxis(leftStickHorizontalAxis), ReadAxis(leftStickVerticalAxis));
         Vector2 keyboardLeft = new Vector2(AxisFromKeys(KeyCode.D, KeyCode.A), AxisFromKeys(KeyCode.W, KeyCode.S));
-        Vector2 leftStick = SelectInputVector(controllerLeft, keyboardLeft);
+        Vector2 leftStick = SelectInputVector(controllerLeft, keyboardLeft, leftVirtualJoystick);
 
         Vector2 controllerRight = new Vector2(ReadAxis(rightStickHorizontalAxis), ReadAxis(rightStickVerticalAxis));
         Vector2 keyboardRight = new Vector2(AxisFromKeys(KeyCode.RightArrow, KeyCode.LeftArrow), AxisFromKeys(KeyCode.UpArrow, KeyCode.DownArrow));
-        Vector2 rightStick = SelectInputVector(controllerRight, keyboardRight);
+        Vector2 rightStick = SelectInputVector(controllerRight, keyboardRight, rightVirtualJoystick);
+
+        _leftStickRaw = leftStick;
+        _rightStickRaw = rightStick;
 
         float throttleInput = 0f;
         float yawInput = 0f;
@@ -164,9 +239,9 @@ public class DroneFlightController : MonoBehaviour
         {
             case ControlStickMode.Mode1:
                 throttleInput = rightStick.y;
-                yawInput = rightStick.x;
+                yawInput = leftStick.x;
                 pitchInput = leftStick.y;
-                rollInput = leftStick.x;
+                rollInput = rightStick.x;
                 break;
             case ControlStickMode.Mode2:
             default:
@@ -195,6 +270,10 @@ public class DroneFlightController : MonoBehaviour
         _planarInput = new Vector2(
             Mathf.Clamp(rollInput * rollSensitivity, -rollSensitivity, rollSensitivity),
             Mathf.Clamp(pitchInput * pitchSensitivity, -pitchSensitivity, pitchSensitivity));
+
+        _verticalControlInput = _verticalInput;
+        _yawControlInput = _yawInput;
+        _planarControlInput = _planarInput;
     }
 
     float ReadAxis(string axisName)
@@ -218,15 +297,29 @@ public class DroneFlightController : MonoBehaviour
         return value;
     }
 
-    Vector2 SelectInputVector(Vector2 controllerValue, Vector2 keyboardValue)
+    Vector2 SelectInputVector(Vector2 controllerValue, Vector2 keyboardValue, VirtualJoystick virtualJoystick)
     {
-        Vector2 chosen = controllerValue;
-        if (!_controllerConnected || chosen.magnitude < inputDeadZone)
+        Vector2 controllerClamped = ClampInput(controllerValue);
+        Vector2 keyboardClamped = ClampInput(keyboardValue);
+
+        if (virtualJoystick != null)
         {
-            chosen = keyboardValue;
+            Vector2 virtualValue = ClampInput(virtualJoystick.Value);
+            if (preferVirtualJoysticks || virtualJoystick.HasInput)
+            {
+                return virtualValue;
+            }
         }
-        return new Vector2(Mathf.Clamp(chosen.x, -1f, 1f), Mathf.Clamp(chosen.y, -1f, 1f));
+
+        if (_controllerConnected && controllerClamped.magnitude > inputDeadZone)
+        {
+            return controllerClamped;
+        }
+
+        return keyboardClamped;
     }
+
+    Vector2 ClampInput(Vector2 value) => new Vector2(Mathf.Clamp(value.x, -1f, 1f), Mathf.Clamp(value.y, -1f, 1f));
 
     float ApplyDeadZone(float value) => Mathf.Abs(value) < inputDeadZone ? 0f : value;
 
@@ -280,8 +373,8 @@ public class DroneFlightController : MonoBehaviour
         UpdateYawTarget(dt);
         UpdateAltitudeTarget(dt);
 
-        float pitchDeg = Mathf.Clamp(_planarInput.y, -1f, 1f) * maxTiltAngle;
-        float rollDeg = Mathf.Clamp(-_planarInput.x, -1f, 1f) * maxTiltAngle;
+        float pitchDeg = Mathf.Clamp(_planarControlInput.y, -1f, 1f) * maxTiltAngle;
+        float rollDeg = Mathf.Clamp(-_planarControlInput.x, -1f, 1f) * maxTiltAngle;
 
         Quaternion yawRotation = Quaternion.AngleAxis(_targetYawDeg, Vector3.up);
         Quaternion tiltRotation = Quaternion.Euler(pitchDeg, 0f, rollDeg);
@@ -331,31 +424,176 @@ public class DroneFlightController : MonoBehaviour
 
     void ApplyThrust(float targetThrust, float dt)
     {
-        _currentThrust = Mathf.MoveTowards(_currentThrust, targetThrust, thrustSlewRate * dt);
+        UpdateForcedRotorThrottle(dt);
+
+        if (!_motorsArmed)
+        {
+            _currentThrust = Mathf.MoveTowards(_currentThrust, 0f, thrustSlewRate * dt);
+
+            float idleRotorLevel = _forcedRotorThrottle >= 0f ? Mathf.Clamp01(_forcedRotorThrottle) : 0f;
+
+            if (_droneScript != null)
+            {
+                _droneScript.throttle01 = idleRotorLevel;
+            }
+
+            UpdateRotorAudio(idleRotorLevel, dt);
+            return;
+        }
+
+        bool throttleLocked = _isLanded && !_liftOffRequested;
+
+        if (throttleLocked)
+        {
+            float hoverThrust = Mathf.Clamp(_rb.mass * Physics.gravity.magnitude * hoverThrustMultiplier, 0f, maxThrust);
+            _currentThrust = Mathf.MoveTowards(_currentThrust, hoverThrust, thrustSlewRate * dt);
+        }
+        else
+        {
+            _currentThrust = Mathf.MoveTowards(_currentThrust, targetThrust, thrustSlewRate * dt);
+        }
+
         Vector3 thrust = transform.up * _currentThrust;
         _rb.AddForce(thrust, ForceMode.Force);
 
-        if (_droneScript != null)
+        float rotorLevel;
+        float rotorOutput;
+
+        if (_forcedRotorThrottle >= 0f)
+        {
+            rotorLevel = Mathf.Clamp01(_forcedRotorThrottle);
+            rotorOutput = rotorLevel;
+        }
+        else
         {
             float normalized = maxThrust > 0f ? Mathf.Clamp01(_currentThrust / maxThrust) : 0f;
-            float rotorThrottle = Mathf.Lerp(0.6f, 1f, normalized);
-            _droneScript.throttle01 = rotorThrottle;
+            rotorLevel = normalized;
+            rotorOutput = Mathf.Lerp(0.6f, 1f, normalized);
+        }
+
+        if (_droneScript != null)
+        {
+            _droneScript.throttle01 = rotorOutput;
+        }
+
+        UpdateRotorAudio(rotorLevel, dt);
+    }
+
+    void UpdateForcedRotorThrottle(float dt)
+    {
+        if (_forcedRotorThrottleTarget < 0f)
+        {
+            return;
+        }
+
+        float target = Mathf.Clamp01(_forcedRotorThrottleTarget);
+        float current = _forcedRotorThrottle >= 0f ? Mathf.Clamp01(_forcedRotorThrottle) : 0f;
+        float duration = target > current
+            ? Mathf.Max(0.05f, armThrottleRampDuration)
+            : Mathf.Max(0.05f, disarmThrottleRampDuration);
+
+        if (duration <= Mathf.Epsilon)
+        {
+            _forcedRotorThrottle = target;
+        }
+        else
+        {
+            float step = dt / duration;
+            _forcedRotorThrottle = Mathf.MoveTowards(current, target, step);
+        }
+    }
+
+    void UpdateRotorAudio(float rotorLevel, float dt)
+    {
+        if (rotorAudioSource == null) return;
+
+        rotorLevel = Mathf.Clamp01(rotorLevel);
+
+        float minPitch = Mathf.Min(rotorPitchMin, rotorPitchMax);
+        float maxPitch = Mathf.Max(rotorPitchMin, rotorPitchMax);
+        float idlePitch = Mathf.Clamp(rotorPitchIdle, minPitch, maxPitch);
+        float hoverPitch = Mathf.Clamp(rotorPitchHover, minPitch, maxPitch);
+
+        float thrustNormalized = maxThrust > 0f ? Mathf.Clamp01(_currentThrust / maxThrust) : 0f;
+        float forcedLevel = _forcedRotorThrottle >= 0f ? Mathf.Clamp01(_forcedRotorThrottle) : rotorLevel;
+        float baseLevel = Mathf.Max(thrustNormalized, forcedLevel * 0.15f);
+
+        float hoverThrust = _rb != null ? _rb.mass * Physics.gravity.magnitude * hoverThrustMultiplier : 0f;
+        float hoverLevel = Mathf.Clamp01(hoverThrust / Mathf.Max(0.1f, maxThrust));
+
+        float targetPitch;
+        if (_isLanded && !_liftOffRequested)
+        {
+            float landedBlend = Mathf.Clamp01(forcedLevel);
+            targetPitch = Mathf.Lerp(minPitch, idlePitch, landedBlend);
+        }
+        else
+        {
+            float hoverFactor = hoverLevel > 1e-4f ? Mathf.Clamp01(baseLevel / hoverLevel) : baseLevel;
+            targetPitch = Mathf.Lerp(idlePitch, hoverPitch, hoverFactor);
+
+            float verticalVelocity = _rb != null ? Vector3.Dot(_rb.velocity, Vector3.up) : 0f;
+            float ascentVelocityFactor = rotorPitchAscentReferenceSpeed > 0.01f
+                ? Mathf.Clamp01(Mathf.Max(0f, verticalVelocity) / rotorPitchAscentReferenceSpeed)
+                : 0f;
+            float ascentInputFactor = Mathf.Clamp01(Mathf.Max(0f, _verticalControlInput));
+            float ascentFactor = Mathf.Clamp01(Mathf.Max(ascentVelocityFactor, ascentInputFactor));
+            targetPitch += rotorPitchAscentBoost * ascentFactor;
+
+            Vector3 planarVelocity = _rb != null ? new Vector3(_rb.velocity.x, 0f, _rb.velocity.z) : Vector3.zero;
+            float moveFactor = Mathf.Clamp01(planarVelocity.magnitude / Mathf.Max(0.1f, rotorPitchMoveReferenceSpeed));
+            targetPitch += rotorPitchMoveBoost * moveFactor;
+        }
+
+        targetPitch = Mathf.Clamp(targetPitch, minPitch, maxPitch);
+
+        float slew = Mathf.Max(0.1f, rotorPitchSlewRate);
+        _currentRotorPitch = Mathf.MoveTowards(_currentRotorPitch, targetPitch, slew * Mathf.Max(0f, dt));
+        rotorAudioSource.pitch = _currentRotorPitch;
+
+        bool shouldPlay = _motorsArmed || _forcedRotorThrottleTarget > 0f || forcedLevel > 0.01f || targetPitch > minPitch + 0.01f;
+        if (shouldPlay)
+        {
+            if (!rotorAudioSource.isPlaying)
+            {
+                rotorAudioSource.Play();
+            }
+            _rotorAudioStopPending = false;
+        }
+        else if (!_motorsArmed)
+        {
+            _rotorAudioStopPending = true;
+        }
+
+        if (_rotorDeactivatePending && forcedLevel <= 0.001f && baseLevel <= 0.001f)
+        {
+            if (_droneScript != null)
+            {
+                _droneScript.SetRotorsActive(false);
+            }
+            _rotorDeactivatePending = false;
+        }
+
+        if (_rotorAudioStopPending && !_motorsArmed && forcedLevel <= 0.001f && baseLevel <= 0.001f && Mathf.Abs(_currentRotorPitch - minPitch) < 0.01f)
+        {
+            rotorAudioSource.Stop();
+            _rotorAudioStopPending = false;
         }
     }
 
     void UpdateYawTarget(float dt)
     {
-        if (Mathf.Abs(_yawInput) < Mathf.Epsilon) return;
-        _targetYawDeg = NormalizeAngle(_targetYawDeg + _yawInput * yawRateDegPerSec * dt);
+        if (Mathf.Abs(_yawControlInput) < Mathf.Epsilon) return;
+        _targetYawDeg = NormalizeAngle(_targetYawDeg + _yawControlInput * yawRateDegPerSec * dt);
     }
 
     void UpdateHoverTarget(float dt)
     {
-        bool hasPlanarInput = _planarInput.magnitude > autoHoldInputThreshold;
+        bool hasPlanarInput = _planarControlInput.magnitude > autoHoldInputThreshold;
 
         if (hasPlanarInput)
         {
-            Vector3 planar = new Vector3(_planarInput.x, 0f, _planarInput.y);
+            Vector3 planar = new Vector3(_planarControlInput.x, 0f, _planarControlInput.y);
             float planarMagnitude = planar.magnitude;
             float maxPlanarInput = Mathf.Max(1f, rollInputSensitivity, pitchInputSensitivity);
             float clampedMagnitude = Mathf.Clamp(planarMagnitude, 0f, maxPlanarInput);
@@ -375,10 +613,10 @@ public class DroneFlightController : MonoBehaviour
             _hoverTargetPosition.z = _rb.position.z;
         }
 
-        if (Mathf.Abs(_verticalInput) > autoHoldInputThreshold)
+        if (Mathf.Abs(_verticalControlInput) > autoHoldInputThreshold)
         {
             float verticalScaleFactor = _baseMaxVerticalVelocity > 1e-4f ? maxVerticalVelocity / _baseMaxVerticalVelocity : 1f;
-            float desiredVerticalVelocity = Mathf.Clamp(_verticalInput * altitudeCommandSpeed * verticalScaleFactor, -maxVerticalVelocity, maxVerticalVelocity);
+            float desiredVerticalVelocity = Mathf.Clamp(_verticalControlInput * altitudeCommandSpeed * verticalScaleFactor, -maxVerticalVelocity, maxVerticalVelocity);
             _hoverTargetPosition += Vector3.up * (desiredVerticalVelocity * dt);
         }
         else
@@ -391,15 +629,226 @@ public class DroneFlightController : MonoBehaviour
 
     void UpdateAltitudeTarget(float dt)
     {
-        if (Mathf.Abs(_verticalInput) <= autoHoldInputThreshold)
+        if (Mathf.Abs(_verticalControlInput) <= autoHoldInputThreshold)
         {
             _targetAltitude = _rb.position.y;
             return;
         }
 
         float verticalScaleFactor = _baseMaxVerticalVelocity > 1e-4f ? maxVerticalVelocity / _baseMaxVerticalVelocity : 1f;
-        float desiredVerticalVelocity = Mathf.Clamp(_verticalInput * altitudeCommandSpeed * verticalScaleFactor, -maxVerticalVelocity, maxVerticalVelocity);
+        float desiredVerticalVelocity = Mathf.Clamp(_verticalControlInput * altitudeCommandSpeed * verticalScaleFactor, -maxVerticalVelocity, maxVerticalVelocity);
         _targetAltitude += desiredVerticalVelocity * dt;
+    }
+
+    void UpdateLandingState(float dt)
+    {
+        if (_rb == null) return;
+
+        _wasLanded = _isLanded;
+        _isLanded = EvaluateLanding();
+
+        if (_isLanded)
+        {
+            Vector3 planarVelocity = new Vector3(_rb.velocity.x, 0f, _rb.velocity.z);
+            bool withinVertical = Mathf.Abs(_rb.velocity.y) <= landingVerticalSpeedThreshold;
+            bool withinPlanar = planarVelocity.magnitude <= landingPlanarSpeedThreshold;
+            if (!(withinVertical && withinPlanar))
+            {
+                _isLanded = false;
+            }
+        }
+
+        if (!_isLanded)
+        {
+            _disarmHoldTimer = 0f;
+            _armHoldTimer = 0f;
+            _planarControlInput = _planarInput;
+            _yawControlInput = _yawInput;
+            _verticalControlInput = _verticalInput;
+            _liftOffRequested = false;
+            _rotorAudioStopPending = false;
+            _rotorDeactivatePending = false;
+            if (_motorsArmed && (_forcedRotorThrottle >= 0f || _forcedRotorThrottleTarget >= 0f))
+            {
+                _forcedRotorThrottle = -1f;
+                _forcedRotorThrottleTarget = -1f;
+            }
+            RestoreLandingConstraints();
+            return;
+        }
+
+        float holdDt = Mathf.Max(0f, dt);
+        float disarmDuration = Mathf.Max(0.05f, disarmHoldDuration);
+        float armDuration = Mathf.Max(0.05f, armHoldDuration);
+
+        if (_verticalInput <= disarmInputThreshold)
+        {
+            _disarmHoldTimer += holdDt;
+            if (_disarmHoldTimer >= disarmDuration)
+            {
+                DisarmMotors();
+            }
+        }
+        else
+        {
+            _disarmHoldTimer = 0f;
+        }
+
+        if (!_motorsArmed && DetectArmGesture())
+        {
+            _armHoldTimer += holdDt;
+            if (_armHoldTimer >= armDuration)
+            {
+                ArmMotors();
+            }
+        }
+        else
+        {
+            _armHoldTimer = 0f;
+        }
+
+        _planarControlInput = Vector2.zero;
+        _yawControlInput = 0f;
+        _verticalControlInput = Mathf.Max(0f, _verticalInput);
+
+        if (_verticalInput > autoHoldInputThreshold)
+        {
+            _liftOffRequested = true;
+        }
+        else if (!_motorsArmed)
+        {
+            _liftOffRequested = false;
+        }
+
+        if (_liftOffRequested)
+        {
+            RestoreLandingConstraints();
+        }
+        else
+        {
+            ApplyLandingConstraints();
+        }
+    }
+
+    void ApplyLandingConstraints()
+    {
+        if (_rb == null) return;
+        if (!freezePositionWhenLanded && !freezeRotationWhenLanded) return;
+        if (_constraintsFrozen) return;
+
+        RigidbodyConstraints constraints = _initialConstraints;
+
+        if (freezePositionWhenLanded)
+        {
+            constraints |= RigidbodyConstraints.FreezePositionX
+                         | RigidbodyConstraints.FreezePositionZ;
+        }
+
+        if (freezeRotationWhenLanded)
+        {
+            constraints |= RigidbodyConstraints.FreezeRotationX
+                         | RigidbodyConstraints.FreezeRotationY
+                         | RigidbodyConstraints.FreezeRotationZ;
+        }
+
+        _rb.constraints = constraints;
+        _rb.velocity = Vector3.zero;
+        _rb.angularVelocity = Vector3.zero;
+        _constraintsFrozen = true;
+    }
+
+    void RestoreLandingConstraints()
+    {
+        if (_rb == null) return;
+        if (!_constraintsFrozen) return;
+
+        _rb.constraints = _initialConstraints;
+        _constraintsFrozen = false;
+    }
+
+    bool EvaluateLanding()
+    {
+        if (_rb == null) return false;
+
+        float rayDistance = Mathf.Max(0.05f, landingCheckDistance);
+        float probeRadius = Mathf.Clamp(landingProbeRadius, 0.01f, 2f);
+        float offset = Mathf.Max(0f, landingProbeOffset);
+        Vector3 origin = _rb.worldCenterOfMass + Vector3.down * offset;
+        int mask = landingLayerMask.value;
+        if (mask == 0) mask = Physics.DefaultRaycastLayers;
+
+        int hitCount = Physics.SphereCastNonAlloc(origin, probeRadius, Vector3.down, _landingHits, rayDistance, mask, QueryTriggerInteraction.Ignore);
+        bool groundDetected = false;
+        float closestDistance = float.PositiveInfinity;
+
+        for (int i = 0; i < hitCount; i++)
+        {
+            var hit = _landingHits[i];
+            if (hit.collider == null) continue;
+            if (hit.collider.attachedRigidbody == _rb) continue;
+            if (hit.collider.transform.IsChildOf(transform)) continue;
+            groundDetected = true;
+            closestDistance = Mathf.Min(closestDistance, hit.distance);
+        }
+
+        if (!groundDetected) return false;
+
+        float tolerance = Mathf.Max(0.005f, landingHeightTolerance);
+        return closestDistance <= tolerance;
+    }
+
+    bool DetectArmGesture()
+    {
+        float threshold = Mathf.Clamp01(Mathf.Abs(armGestureThreshold));
+        if (threshold <= 0f) return false;
+
+        return _leftStickRaw.x <= -threshold &&
+               _leftStickRaw.y <= -threshold &&
+               _rightStickRaw.x >= threshold &&
+               _rightStickRaw.y <= -threshold;
+    }
+
+    void DisarmMotors()
+    {
+        if (!_motorsArmed && Mathf.Abs(_forcedRotorThrottle) < 1e-4f && Mathf.Abs(_forcedRotorThrottleTarget) < 1e-4f) return;
+
+        float currentNormalized = maxThrust > 0f ? Mathf.Clamp01(_currentThrust / maxThrust) : 0f;
+        _motorsArmed = false;
+        _forcedRotorThrottle = _forcedRotorThrottle >= 0f ? Mathf.Clamp01(_forcedRotorThrottle) : currentNormalized;
+        _forcedRotorThrottleTarget = 0f;
+        _currentThrust = 0f;
+        _disarmHoldTimer = 0f;
+        _armHoldTimer = 0f;
+        _liftOffRequested = false;
+
+        _rotorAudioStopPending = rotorAudioSource != null;
+        _rotorDeactivatePending = _droneScript != null;
+    }
+
+    void ArmMotors()
+    {
+        if (_motorsArmed && (_forcedRotorThrottleTarget >= 0.99f || _forcedRotorThrottle >= 0.99f)) return;
+
+        _motorsArmed = true;
+        _forcedRotorThrottle = Mathf.Max(0f, _forcedRotorThrottle >= 0f ? _forcedRotorThrottle : 0f);
+        _forcedRotorThrottleTarget = 1f;
+        _currentThrust = Mathf.Clamp(_currentThrust, 0f, maxThrust);
+        _armHoldTimer = 0f;
+        _disarmHoldTimer = 0f;
+        _liftOffRequested = false;
+        _rotorAudioStopPending = false;
+        _rotorDeactivatePending = false;
+
+        if (rotorAudioSource != null && !rotorAudioSource.isPlaying)
+        {
+            rotorAudioSource.pitch = Mathf.Min(rotorPitchMin, rotorPitchMax);
+            rotorAudioSource.Play();
+        }
+
+        if (_droneScript != null)
+        {
+            _droneScript.SetRotorsActive(true);
+        }
     }
 
     public void SetFlightMode(FlightMode mode, bool force = false)
@@ -413,6 +862,7 @@ public class DroneFlightController : MonoBehaviour
         _currentThrust = Mathf.Clamp(_rb.mass * Physics.gravity.magnitude * hoverThrustMultiplier, 0f, maxThrust);
         RefreshModeLabel();
         SyncUI();
+        UpdateStatusUI();
     }
 
     public void CycleFlightMode(int direction = 1)
@@ -788,6 +1238,23 @@ public class DroneFlightController : MonoBehaviour
         SetSliderValue(yawSensitivitySlider, YawInputSensitivity);
         SetSliderValue(maxPlanarVelocitySlider, maxPlanarVelocity);
         SetSliderValue(maxVerticalVelocitySlider, maxVerticalVelocity);
+    }
+
+    void UpdateStatusUI()
+    {
+        if (_rb == null) return;
+
+        if (altitudeStatusLabel != null)
+        {
+            float altitudeMeters = _rb.position.y;
+            altitudeStatusLabel.text = $"高度:{altitudeMeters:0.0} m";
+        }
+
+        if (speedStatusLabel != null)
+        {
+            float speedMetersPerSecond = _rb.velocity.magnitude;
+            speedStatusLabel.text = $"速度:{speedMetersPerSecond:0.0} m/s";
+        }
     }
 }
 

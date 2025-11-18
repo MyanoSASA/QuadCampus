@@ -666,4 +666,19 @@ public class DroneScript : MonoBehaviour
     }
 
     static float Normalize180(float deg) => Mathf.Repeat(deg + 180f, 360f) - 180f;
+
+    public void SetRotorsActive(bool active)
+    {
+        rotorsMasterOn = active;
+        SetRotorActive(rotorLF, active);
+        SetRotorActive(rotorRF, active);
+        SetRotorActive(rotorLR, active);
+        SetRotorActive(rotorRR, active);
+    }
+
+    void SetRotorActive(RotorUnit rotor, bool active)
+    {
+        if (rotor == null) return;
+        rotor.isOn = active;
+    }
 }
